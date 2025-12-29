@@ -947,65 +947,71 @@ class _DownloadWorker {
             return;
           }
 
-          if (track.album?.id == null) {
-            _error('Track has no album ID: ${download.trackId}');
+          // Ensure embedded album data is present
+          if (track.album == null) {
+            _error('Track has no embedded album data: ${download.trackId}');
             _updateState(DownloadStateDart.DEEZER_ERROR);
             return;
           }
 
-          _log('Fetching album metadata for ID: ${track.album!.id}');
+          // Use embedded album object
+          album = track.album;
+          _log('Using embedded album metadata from track response - album id: ${album?.id}');
 
-          try {
-            album = await _deezer!.album(track.album!.id!);
-          } catch (albumError) {
-            _error(
-              'Album API call failed for ID ${track.album!.id}: $albumError',
-            );
-            _updateState(DownloadStateDart.DEEZER_ERROR);
-            return;
-          }
-
+          // Fetch the public track JSON (helpful for publicTrack fields)
           _log('Fetching public track API for ID: ${download.trackId}');
-
           try {
             final trackData = await _deezer!.callPublicApi(
               'track/${download.trackId}',
             );
-
             publicTrack = trackData;
             _log('Public track data received: ${trackData.keys.join(", ")}');
           } catch (publicTrackError) {
-            _error('Public track API call failed: $publicTrackError');
-            _updateState(DownloadStateDart.DEEZER_ERROR);
-            return;
+            // Don't fail hard if public track is unavailable, just log and continue.
+            _error('Public track API call failed (continuing with embedded data): $publicTrackError');
+            publicTrack = null;
           }
 
-          _log('Fetching lyrics for ID: ${download.trackId}');
+          // Derive publicAlbum: prefer publicTrack['album'] if present, otherwise build from embedded album
+          if (publicTrack != null && publicTrack['album'] != null) {
+            publicAlbum = publicTrack['album'] as Map<dynamic, dynamic>;
+            _log('Derived publicAlbum from public track data: ${publicAlbum.keys.join(", ")}');
+          } else {
+            // Build a fallback publicAlbum map from the embedded album object
+            String? md5;
+            try {
+              md5 = album?.art?.imageHash;
+            } catch (e) {
+              md5 = null;
+            }
+            // try additional possible field names defensively
+            try {
+              if (md5 == null) md5 = (album as dynamic).md5_image as String?;
+            } catch (_) {}
+            try {
+              if (md5 == null) md5 = (album as dynamic).md5Image as String?;
+            } catch (_) {}
 
+            publicAlbum = <String, dynamic>{
+              'id': album?.id,
+              'title': album?.title,
+              'md5_image': md5,
+              'release_date': album?.releaseDate,
+              //'tracklist': album?.tracklist,
+              // unknown / optional fields left null (nb_tracks, label, upc, genres)
+            };
+            _log('Built fallback publicAlbum from embedded album: ${publicAlbum.keys.join(", ")}');
+          }
+
+          // Lyrics - attempt to fetch but continue if unavailable
+          _log('Fetching lyrics for ID: ${download.trackId}');
           try {
             final lyricsData = await _deezer!.lyrics(download.trackId);
-
             lyrics = lyricsData;
             _log('Lyrics data received: ${lyrics..toString()}');
           } catch (lyricsError) {
-            _error('Lyrics API call failed: $lyricsError');
-            _updateState(DownloadStateDart.DEEZER_ERROR);
-            return;
-          }
-
-          _log('Fetching public album API for ID: ${track.album!.id}');
-
-          try {
-            final albumData = await _deezer!.callPublicApi(
-              'album/${track.album!.id}',
-            );
-
-            publicAlbum = albumData;
-            _log('Public album data received: ${albumData.keys.join(", ")}');
-          } catch (publicAlbumError) {
-            _error('Public album API call failed: $publicAlbumError');
-            _updateState(DownloadStateDart.DEEZER_ERROR);
-            return;
+            _error('Lyrics API call failed (continuing without lyrics): $lyricsError');
+            lyrics = null;
           }
         } catch (e, stackTrace) {
           _error('Failed to fetch metadata: $e');
@@ -1156,12 +1162,16 @@ class _DownloadWorker {
             await _downloadAlbumCover(outFile, album!);
           }
 
+          // Ensure publicAlbum/publicTrack are non-null maps when tagging
+          final tagPublicAlbum = publicAlbum ?? <String, dynamic>{};
+          final tagPublicTrack = publicTrack ?? <String, dynamic>{};
+
           // Tag file (pass cover art bytes for tagging)
           await _tagFile(
             outFile,
             track,
-            publicAlbum!,
-            publicTrack!,
+            tagPublicAlbum,
+            tagPublicTrack,
             lyrics,
             coverArtBytes,
           );
