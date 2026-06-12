@@ -362,7 +362,7 @@ jobs:
   CREATE_RELEASE:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [LINUX, ANDROID, MACOSIOS, WINDOWS]
+    needs: [LINUX, ANDROID, WINDOWS]
     permissions:
       contents: write
     steps:
